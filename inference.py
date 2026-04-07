@@ -17,6 +17,8 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import os
+
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -24,14 +26,18 @@ from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
 
 # specify the path to the model
-model_path = "deepseek-ai/Janus-1.3B"
+model_path = os.environ.get("JANUS_MODEL_PATH", "deepseek-ai/Janus-Pro-1B")
+dtype_name = os.environ.get("JANUS_DTYPE", "bfloat16").lower()
+dtype = torch.bfloat16 if dtype_name == "bfloat16" else torch.float16
+
+print(f"Loading model from {model_path} with dtype={dtype_name}")
 vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 
 vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
     model_path, trust_remote_code=True
 )
-vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+vl_gpt = vl_gpt.to(dtype).cuda().eval()
 
 conversation = [
     {

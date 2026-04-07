@@ -17,23 +17,28 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import os
+
+import numpy as np
+import PIL.Image
 import torch
 from transformers import AutoModelForCausalLM
 
 from janus.models import MultiModalityCausalLM, VLChatProcessor
-import numpy as np
-import os
-import PIL.Image
 
 # specify the path to the model
-model_path = "deepseek-ai/Janus-1.3B"
+model_path = os.environ.get("JANUS_MODEL_PATH", "deepseek-ai/Janus-Pro-1B")
+dtype_name = os.environ.get("JANUS_DTYPE", "bfloat16").lower()
+dtype = torch.bfloat16 if dtype_name == "bfloat16" else torch.float16
+
+print(f"Loading model from {model_path} with dtype={dtype_name}")
 vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 
 vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
     model_path, trust_remote_code=True
 )
-vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+vl_gpt = vl_gpt.to(dtype).cuda().eval()
 
 conversation = [
     {
@@ -57,7 +62,7 @@ def generate(
     vl_chat_processor: VLChatProcessor,
     prompt: str,
     temperature: float = 1,
-    parallel_size: int = 16,
+    parallel_size: int = int(os.environ.get("JANUS_PARALLEL_SIZE", "1")),
     cfg_weight: float = 5,
     image_token_num_per_image: int = 576,
     img_size: int = 384,

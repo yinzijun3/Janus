@@ -251,8 +251,9 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         images_emb_mask = rearrange(images_emb_mask, "b n t -> b (n t)")
 
         # [b, T, D]
-        input_ids[input_ids < 0] = 0  # ignore the image embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        safe_input_ids = input_ids.clone()
+        safe_input_ids[safe_input_ids < 0] = 0  # ignore the image embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(safe_input_ids).clone()
 
         # replace with the image embeddings
         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
