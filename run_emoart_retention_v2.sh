@@ -11,13 +11,15 @@ fi
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate januspro
 export PYTHONPATH=/root/miniconda3/lib/python3.10/site-packages:${PYTHONPATH:-}
+export TOKENIZERS_PARALLELISM=false
 
 REPO_DIR="/root/autodl-tmp/repos/Janus"
-TRAIN_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/train.jsonl"
+TRAIN_MANIFEST="/root/autodl-tmp/emoart_gen_runs/data_risk_audit_train_texture_meta/train_frameclean_v2.jsonl"
 VAL_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/val.jsonl"
-TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_conservative_crop_headonly_v1"
-COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_8"
-COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32"
+RETENTION_MANIFEST="/root/autodl-tmp/emoart_gen_runs/retention_prompts_v2.jsonl"
+TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_retention_v2_bs8"
+COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_retention_v2_bs8_8"
+COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_retention_v2_bs8_32"
 ADAPTER_PATH="${TRAIN_OUT}/final_adapter"
 
 cd "${REPO_DIR}"
@@ -27,25 +29,34 @@ case "${MODE}" in
     python "${REPO_DIR}/train_emoart_gen_lora.py" \
       --train-data "${TRAIN_MANIFEST}" \
       --val-data "${VAL_MANIFEST}" \
+      --retention-manifest "${RETENTION_MANIFEST}" \
       --output-dir "${TRAIN_OUT}" \
-      --per-device-train-batch-size 2 \
-      --per-device-eval-batch-size 2 \
+      --per-device-train-batch-size 8 \
+      --per-device-eval-batch-size 8 \
+      --retention-batch-size 8 \
+      --retention-num-workers 0 \
       --lora-r 32 \
       --lora-alpha 64 \
       --lora-dropout 0.05 \
-      --target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
-      --generation-module-mode head_only \
+      --target-modules q_proj k_proj v_proj o_proj \
+      --generation-module-mode frozen \
       --learning-rate 1e-4 \
       --generation-learning-rate 1e-4 \
       --scheduler-type cosine \
-      --gradient-accumulation-steps 8 \
-      --num-epochs 3 \
+      --gradient-accumulation-steps 2 \
+      --num-epochs 2 \
       --image-preprocess-mode crop \
       --dtype bf16 \
       --prompt-template default \
       --art-texture-mode off \
       --art-texture-fields all \
-      --art-texture-prob 0.0
+      --art-texture-prob 0.0 \
+      --retention-loss-weight 0.05 \
+      --retention-token-prefix 16 \
+      --retention-temperature 1.0 \
+      --retention-cfg-weight 5.0 \
+      --retention-sample-strategy greedy \
+      --retention-seed 1234
     ;;
   compare8)
     python "${REPO_DIR}/compare_emoart_gen.py" \
@@ -55,7 +66,7 @@ case "${MODE}" in
       --num-samples 8 \
       --seed 42 \
       --dtype bf16 \
-      --parallel-size 2 \
+      --parallel-size 4 \
       --image-preprocess-mode crop \
       --sample-strategy greedy \
       --prompt-template default \
@@ -70,7 +81,7 @@ case "${MODE}" in
       --num-samples 32 \
       --seed 42 \
       --dtype bf16 \
-      --parallel-size 2 \
+      --parallel-size 4 \
       --image-preprocess-mode crop \
       --sample-strategy greedy \
       --prompt-template default \

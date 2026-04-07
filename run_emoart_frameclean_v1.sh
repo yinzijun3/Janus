@@ -13,11 +13,11 @@ conda activate januspro
 export PYTHONPATH=/root/miniconda3/lib/python3.10/site-packages:${PYTHONPATH:-}
 
 REPO_DIR="/root/autodl-tmp/repos/Janus"
-TRAIN_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/train.jsonl"
+TRAIN_MANIFEST="/root/autodl-tmp/emoart_gen_runs/data_risk_audit_train_texture_meta/train_frameclean_v1.jsonl"
 VAL_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/val.jsonl"
-TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_conservative_crop_headonly_v1"
-COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_8"
-COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32"
+TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_frameclean_v1"
+COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_frameclean_v1_8"
+COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_frameclean_v1_32"
 ADAPTER_PATH="${TRAIN_OUT}/final_adapter"
 
 cd "${REPO_DIR}"
@@ -33,13 +33,13 @@ case "${MODE}" in
       --lora-r 32 \
       --lora-alpha 64 \
       --lora-dropout 0.05 \
-      --target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
-      --generation-module-mode head_only \
+      --target-modules q_proj k_proj v_proj o_proj \
+      --generation-module-mode frozen \
       --learning-rate 1e-4 \
       --generation-learning-rate 1e-4 \
       --scheduler-type cosine \
       --gradient-accumulation-steps 8 \
-      --num-epochs 3 \
+      --num-epochs 2 \
       --image-preprocess-mode crop \
       --dtype bf16 \
       --prompt-template default \

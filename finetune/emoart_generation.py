@@ -16,7 +16,7 @@ _BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 DEFAULT_PROMPT_TEMPLATE = "default"
 DEFAULT_ART_TEXTURE_MODE = "off"
 DEFAULT_ART_TEXTURE_FIELDS = "all"
-PROMPT_TEMPLATE_CHOICES = ("default", "high_brushstroke")
+PROMPT_TEMPLATE_CHOICES = ("default", "high_brushstroke", "v2_minimal")
 ART_TEXTURE_MODE_CHOICES = ("off", "balanced", "strong")
 ART_TEXTURE_FIELD_CHOICES = ("all", "brushstroke_only")
 
@@ -207,6 +207,13 @@ def _build_texture_clauses(
     art_texture_fields: str = DEFAULT_ART_TEXTURE_FIELDS,
 ) -> List[str]:
     clauses: List[str] = []
+    if (
+        prompt_template == "v2_minimal"
+        and art_texture_mode == DEFAULT_ART_TEXTURE_MODE
+        and art_texture_fields == DEFAULT_ART_TEXTURE_FIELDS
+    ):
+        return clauses
+
     brushstroke_text = _clean_text(metadata.get("brushstroke_text", ""))
     medium_tags = _dedupe_keep_order(metadata.get("medium_tags", []))
     texture_tags = _dedupe_keep_order(metadata.get("texture_tags", []))
@@ -253,6 +260,51 @@ def _filter_duplicate_texture_clauses(base_prompt: str, clauses: List[str]) -> L
     return filtered
 
 
+def _split_prompt_clauses(prompt: str) -> List[str]:
+    return [_clean_text(part) for part in prompt.split(".") if _clean_text(part)]
+
+
+def _simplify_intro_clause(clause: str) -> str:
+    normalized = clause.strip(" .")
+    lowered = normalized.lower()
+    if lowered == "expressive artwork":
+        return "artwork"
+    if ", expressive artwork" in lowered:
+        prefix = normalized[: lowered.index(", expressive artwork")].strip(" ,.;")
+        if prefix:
+            return f"{prefix} artwork"
+    return normalized
+
+
+def _compact_existing_prompt(base_prompt: str) -> str:
+    clauses = _split_prompt_clauses(base_prompt)
+    if not clauses:
+        return base_prompt
+
+    kept: List[str] = []
+    for clause in clauses:
+        lowered = clause.lower()
+        label = _clause_label(clause)
+
+        if not kept:
+            kept.append(_simplify_intro_clause(clause))
+            continue
+
+        if label in {"emotional effect", "visual style", "healing atmosphere", "painting medium", "surface detail"}:
+            continue
+        if lowered.startswith("mood "):
+            continue
+        if lowered == "coherent composition, rich detail, strong emotional presence":
+            continue
+        if ":" in clause:
+            continue
+
+        kept.append(clause)
+        break
+
+    return ". ".join(part.strip(" .") for part in kept if part.strip()) + "."
+
+
 def _mean_color(image: Image.Image) -> tuple[int, int, int]:
     image_np = np.asarray(image.convert("RGB"), dtype=np.float32)
     mean_rgb = image_np.mean(axis=(0, 1))
@@ -282,6 +334,24 @@ def build_generation_prompt(
 
     prompt_metadata = extract_prompt_metadata(description, request_id=request_id)
     style_hint = prompt_metadata["style_name"]
+
+    if prompt_template == "v2_minimal":
+        prompt_parts = []
+        if style_hint:
+            prompt_parts.append(f"{style_hint} artwork")
+        else:
+            prompt_parts.append("artwork")
+        if first_section:
+            prompt_parts.append(first_section)
+        prompt_parts.extend(
+            _build_texture_clauses(
+                metadata=prompt_metadata,
+                prompt_template=prompt_template,
+                art_texture_mode=art_texture_mode,
+                art_texture_fields=art_texture_fields,
+            )
+        )
+        return ". ".join(part.strip(" .") for part in prompt_parts if part.strip()) + "."
 
     visual_parts = []
     visual_key_map = {
@@ -346,6 +416,41 @@ def build_prompt_from_record(
             art_texture_mode=art_texture_mode,
             art_texture_fields=art_texture_fields,
         )
+    if prompt_template == "v2_minimal":
+        compact_prompt = _compact_existing_prompt(base_prompt)
+        if art_texture_mode == DEFAULT_ART_TEXTURE_MODE and art_texture_fields == DEFAULT_ART_TEXTURE_FIELDS:
+            return compact_prompt
+        style_name = _clean_text(record.get("style_name", "")) or extract_style_name(record.get("request_id", ""))
+        brushstroke_text = _clean_text(record.get("brushstroke_text", ""))
+        line_quality_text = _clean_text(record.get("line_quality_text", ""))
+        metadata = {
+            "style_name": style_name,
+            "brushstroke_text": brushstroke_text,
+            "line_quality_text": line_quality_text,
+            "texture_tags": record.get("texture_tags", [])
+            or _infer_texture_tags(
+                style_name=style_name,
+                brushstroke_text=brushstroke_text,
+                emotional_impact="",
+                line_quality_text=line_quality_text,
+            ),
+            "medium_tags": record.get("medium_tags", [])
+            or _infer_medium_tags(
+                style_name=style_name,
+                brushstroke_text=brushstroke_text,
+                line_quality_text=line_quality_text,
+            ),
+        }
+        clauses = _build_texture_clauses(
+            metadata=metadata,
+            prompt_template=prompt_template,
+            art_texture_mode=art_texture_mode,
+            art_texture_fields=art_texture_fields,
+        )
+        clauses = _filter_duplicate_texture_clauses(base_prompt=compact_prompt, clauses=clauses)
+        if not clauses:
+            return compact_prompt
+        return compact_prompt.rstrip(" .") + ". " + ". ".join(clauses) + "."
     if (
         prompt_template == DEFAULT_PROMPT_TEMPLATE
         and art_texture_mode == DEFAULT_ART_TEXTURE_MODE
@@ -649,6 +754,19 @@ class JanusGenerationDataCollator:
     def render_prompt(self, feature: EmoArtGenerationSample) -> str:
         if not self.should_enhance_prompt():
             return feature.prompt
+
+        if self.prompt_template != DEFAULT_PROMPT_TEMPLATE:
+            use_texture_variant = (
+                self.art_texture_mode != DEFAULT_ART_TEXTURE_MODE
+                or self.art_texture_fields != DEFAULT_ART_TEXTURE_FIELDS
+            ) and self.art_texture_prob > 0.0 and random.random() <= self.art_texture_prob
+            return build_prompt_from_record(
+                feature.record,
+                prompt_template=self.prompt_template,
+                art_texture_mode=self.art_texture_mode if use_texture_variant else DEFAULT_ART_TEXTURE_MODE,
+                art_texture_fields=self.art_texture_fields if use_texture_variant else DEFAULT_ART_TEXTURE_FIELDS,
+            )
+
         if self.art_texture_prob <= 0.0 or random.random() > self.art_texture_prob:
             return feature.prompt
         return build_prompt_from_record(

@@ -13,11 +13,12 @@ conda activate januspro
 export PYTHONPATH=/root/miniconda3/lib/python3.10/site-packages:${PYTHONPATH:-}
 
 REPO_DIR="/root/autodl-tmp/repos/Janus"
-TRAIN_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/train.jsonl"
+TRAIN_MANIFEST="/root/autodl-tmp/emoart_gen_runs/data_risk_audit_train_texture_meta/train_failure_style_focus_v1.jsonl"
 VAL_MANIFEST="/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/val.jsonl"
-TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_conservative_crop_headonly_v1"
-COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_8"
-COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32"
+BASE_ADAPTER="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_frameclean_v2/final_adapter"
+TRAIN_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_expA_failure_style_focus_v1"
+COMPARE8_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_failure_style_focus_v1_8"
+COMPARE32_OUT="/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_failure_style_focus_v1_32"
 ADAPTER_PATH="${TRAIN_OUT}/final_adapter"
 
 cd "${REPO_DIR}"
@@ -28,18 +29,19 @@ case "${MODE}" in
       --train-data "${TRAIN_MANIFEST}" \
       --val-data "${VAL_MANIFEST}" \
       --output-dir "${TRAIN_OUT}" \
+      --resume-from-checkpoint "${BASE_ADAPTER}" \
       --per-device-train-batch-size 2 \
       --per-device-eval-batch-size 2 \
       --lora-r 32 \
       --lora-alpha 64 \
       --lora-dropout 0.05 \
-      --target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
-      --generation-module-mode head_only \
-      --learning-rate 1e-4 \
-      --generation-learning-rate 1e-4 \
+      --target-modules q_proj k_proj v_proj o_proj \
+      --generation-module-mode frozen \
+      --learning-rate 5e-5 \
+      --generation-learning-rate 5e-5 \
       --scheduler-type cosine \
       --gradient-accumulation-steps 8 \
-      --num-epochs 3 \
+      --num-epochs 0.75 \
       --image-preprocess-mode crop \
       --dtype bf16 \
       --prompt-template default \

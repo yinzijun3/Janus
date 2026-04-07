@@ -1,14 +1,17 @@
 import argparse
 import json
+import math
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import PIL.Image
 import torch
+import torch.nn.functional as F
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
+from torchvision.models import Inception_V3_Weights, inception_v3
 
 from finetune.emoart_generation import (
     ART_TEXTURE_FIELD_CHOICES,
@@ -73,8 +76,31 @@ def parse_args():
         default=DEFAULT_ART_TEXTURE_FIELDS,
         help="Which metadata-derived texture fields are allowed into the evaluation prompt.",
     )
-    parser.add_argument("--use-clipscore", action="store_true")
+    parser.add_argument(
+        "--use-clipscore",
+        dest="use_clipscore",
+        action="store_true",
+        help="Compatibility flag. CLIPScore is enabled by default unless explicitly disabled.",
+    )
+    parser.add_argument(
+        "--disable-clipscore",
+        dest="use_clipscore",
+        action="store_false",
+        help="Skip CLIPScore computation.",
+    )
+    parser.set_defaults(use_clipscore=True)
     parser.add_argument("--clip-model-name", default="openai/clip-vit-base-patch32")
+    parser.add_argument(
+        "--disable-inception-metrics",
+        action="store_true",
+        help="Skip dataset-level FID/KID computation based on Inception-V3 features.",
+    )
+    parser.add_argument(
+        "--inception-batch-size",
+        type=int,
+        default=8,
+        help="Batch size for dataset-level Inception feature extraction.",
+    )
     return parser.parse_args()
 
 
@@ -133,7 +159,16 @@ def compute_clipscore(clip_bundle, image: PIL.Image.Image, prompt: str) -> Optio
     if clip_bundle is None:
         return None
     clip_model, clip_processor = clip_bundle
-    batch = clip_processor(text=[prompt], images=[image], return_tensors="pt", padding=True)
+    tokenizer = getattr(clip_processor, "tokenizer", None)
+    max_length = getattr(tokenizer, "model_max_length", 77) if tokenizer is not None else 77
+    batch = clip_processor(
+        text=[prompt],
+        images=[image],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+    )
     batch = {key: value.cuda() for key, value in batch.items()}
     outputs = clip_model(**batch)
     image_embeds = outputs.image_embeds / outputs.image_embeds.norm(dim=-1, keepdim=True)
@@ -222,6 +257,44 @@ def image_psnr(image_a: PIL.Image.Image, image_b: PIL.Image.Image, image_size: i
     return float(20.0 * np.log10(255.0) - 10.0 * np.log10(mse))
 
 
+def _image_tensor(image: PIL.Image.Image, image_size: int) -> torch.Tensor:
+    array = np.asarray(image.resize((image_size, image_size), PIL.Image.BICUBIC), dtype=np.float32) / 255.0
+    return torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
+
+
+def _ssim_gaussian_kernel(window_size: int = 11, sigma: float = 1.5, channels: int = 3) -> torch.Tensor:
+    coords = torch.arange(window_size, dtype=torch.float32) - (window_size // 2)
+    kernel_1d = torch.exp(-(coords**2) / (2 * sigma**2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    return kernel_2d.expand(channels, 1, window_size, window_size).contiguous()
+
+
+def image_ssim(image_a: PIL.Image.Image, image_b: PIL.Image.Image, image_size: int) -> float:
+    tensor_a = _image_tensor(image_a, image_size)
+    tensor_b = _image_tensor(image_b, image_size)
+    channels = tensor_a.shape[1]
+    kernel = _ssim_gaussian_kernel(channels=channels)
+    padding = kernel.shape[-1] // 2
+
+    mu_a = F.conv2d(tensor_a, kernel, padding=padding, groups=channels)
+    mu_b = F.conv2d(tensor_b, kernel, padding=padding, groups=channels)
+    mu_a_sq = mu_a.pow(2)
+    mu_b_sq = mu_b.pow(2)
+    mu_ab = mu_a * mu_b
+
+    sigma_a_sq = F.conv2d(tensor_a * tensor_a, kernel, padding=padding, groups=channels) - mu_a_sq
+    sigma_b_sq = F.conv2d(tensor_b * tensor_b, kernel, padding=padding, groups=channels) - mu_b_sq
+    sigma_ab = F.conv2d(tensor_a * tensor_b, kernel, padding=padding, groups=channels) - mu_ab
+
+    c1 = 0.01**2
+    c2 = 0.03**2
+    ssim_map = ((2 * mu_ab + c1) * (2 * sigma_ab + c2)) / (
+        (mu_a_sq + mu_b_sq + c1) * (sigma_a_sq + sigma_b_sq + c2) + 1e-12
+    )
+    return float(ssim_map.mean().item())
+
+
 def _grayscale_array(image: PIL.Image.Image, image_size: int) -> np.ndarray:
     return np.asarray(
         image.resize((image_size, image_size), PIL.Image.BICUBIC).convert("L"),
@@ -281,6 +354,103 @@ def texture_abs_errors(
         key: abs(image_metrics[key] - reference_metrics[key])
         for key in image_metrics
     }
+
+
+class InceptionFeatureExtractor(torch.nn.Module):
+    def __init__(self, weights: Inception_V3_Weights):
+        super().__init__()
+        self.model = inception_v3(weights=None, transform_input=False)
+        state_dict = weights.get_state_dict(progress=True, check_hash=False)
+        self.model.load_state_dict(state_dict)
+        self.model.fc = torch.nn.Identity()
+        if hasattr(self.model, "AuxLogits"):
+            self.model.AuxLogits = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        outputs = self.model(x)
+        if isinstance(outputs, tuple):
+            return outputs[0]
+        return outputs
+
+
+def maybe_load_inception_bundle():
+    try:
+        weights = Inception_V3_Weights.IMAGENET1K_V1
+        preprocess = weights.transforms()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = InceptionFeatureExtractor(weights).to(device).eval()
+        return {
+            "model": model,
+            "preprocess": preprocess,
+            "device": device,
+        }
+    except Exception as exc:
+        print({"inception_metrics_unavailable": str(exc)})
+        return None
+
+
+@torch.inference_mode()
+def compute_inception_features(bundle, images: List[PIL.Image.Image], batch_size: int) -> np.ndarray:
+    if bundle is None:
+        raise RuntimeError("Inception bundle is required for feature extraction.")
+    model = bundle["model"]
+    preprocess = bundle["preprocess"]
+    device = bundle["device"]
+    features: List[np.ndarray] = []
+    for start in range(0, len(images), batch_size):
+        batch_images = images[start : start + batch_size]
+        inputs = torch.stack([preprocess(image) for image in batch_images], dim=0).to(device)
+        outputs = model(inputs)
+        features.append(outputs.detach().cpu().numpy())
+    return np.concatenate(features, axis=0)
+
+
+def _feature_stats(features: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    mean = features.mean(axis=0)
+    if features.shape[0] < 2:
+        cov = np.eye(features.shape[1], dtype=np.float64) * 1e-6
+    else:
+        cov = np.cov(features, rowvar=False)
+    return mean.astype(np.float64), cov.astype(np.float64)
+
+
+def _trace_sqrt_product(cov_a: np.ndarray, cov_b: np.ndarray) -> float:
+    cov_prod = cov_a @ cov_b
+    eigvals = np.linalg.eigvals(cov_prod)
+    eigvals = np.real(eigvals)
+    eigvals = np.clip(eigvals, a_min=0.0, a_max=None)
+    return float(np.sqrt(eigvals).sum())
+
+
+def frechet_distance(features_a: np.ndarray, features_b: np.ndarray) -> float:
+    mean_a, cov_a = _feature_stats(features_a)
+    mean_b, cov_b = _feature_stats(features_b)
+    mean_diff = mean_a - mean_b
+    trace_term = _trace_sqrt_product(cov_a, cov_b)
+    value = float(mean_diff.dot(mean_diff) + np.trace(cov_a) + np.trace(cov_b) - 2.0 * trace_term)
+    return max(value, 0.0)
+
+
+def polynomial_mmd_kid(features_a: np.ndarray, features_b: np.ndarray) -> float:
+    x = features_a.astype(np.float64)
+    y = features_b.astype(np.float64)
+    dim = x.shape[1]
+    k_xx = ((x @ x.T) / dim + 1.0) ** 3
+    k_yy = ((y @ y.T) / dim + 1.0) ** 3
+    k_xy = ((x @ y.T) / dim + 1.0) ** 3
+
+    n = x.shape[0]
+    m = y.shape[0]
+    if n > 1:
+        sum_xx = (k_xx.sum() - np.trace(k_xx)) / (n * (n - 1))
+    else:
+        sum_xx = 0.0
+    if m > 1:
+        sum_yy = (k_yy.sum() - np.trace(k_yy)) / (m * (m - 1))
+    else:
+        sum_yy = 0.0
+    sum_xy = k_xy.mean()
+    return float(sum_xx + sum_yy - 2.0 * sum_xy)
 
 
 @torch.inference_mode()
@@ -366,6 +536,9 @@ def write_markdown_report(path: str, summary: Dict[str, object], rows: List[Dict
             f"- PSNR before/after: {row['reference_psnr_before']:.4f} / {row['reference_psnr_after']:.4f}"
         )
         lines.append(
+            f"- SSIM before/after: {row['reference_ssim_before']:.4f} / {row['reference_ssim_after']:.4f}"
+        )
+        lines.append(
             f"- Reference token NLL before/after: {row['reference_token_nll_before']:.4f} / {row['reference_token_nll_after']:.4f}"
         )
         lines.append(
@@ -401,12 +574,16 @@ def main():
     adapted_model, _ = load_model(args.model_path, dtype)
     adapted_model = apply_adapter(adapted_model, args.adapter_path)
     clip_bundle = maybe_load_clipscore(args.clip_model_name) if args.use_clipscore else None
+    inception_bundle = None if args.disable_inception_metrics else maybe_load_inception_bundle()
 
     records = load_jsonl(args.manifest_path)
     random.Random(args.seed).shuffle(records)
     selected_records = records[: args.num_samples]
 
     comparison_rows: List[Dict[str, object]] = []
+    reference_images_for_metrics: List[PIL.Image.Image] = []
+    base_images_for_metrics: List[PIL.Image.Image] = []
+    adapted_images_for_metrics: List[PIL.Image.Image] = []
     for index, record in enumerate(selected_records):
         prompt = build_prompt_from_record(
             record,
@@ -468,6 +645,8 @@ def main():
         before_after_mae = image_mae(base_image, adapted_image, args.image_size)
         before_psnr = image_psnr(base_image, reference_rgb, args.image_size)
         after_psnr = image_psnr(adapted_image, reference_rgb, args.image_size)
+        before_ssim = image_ssim(base_image, reference_rgb, args.image_size)
+        after_ssim = image_ssim(adapted_image, reference_rgb, args.image_size)
         base_texture_metrics = texture_metrics(base_image, args.image_size)
         adapted_texture_metrics = texture_metrics(adapted_image, args.image_size)
         reference_texture_metrics = texture_metrics(reference_rgb, args.image_size)
@@ -483,6 +662,9 @@ def main():
         reference_nll_after = reference_token_nll(adapted_model, processor, prompt, reference_tokens)
         clipscore_before = compute_clipscore(clip_bundle, base_image, prompt)
         clipscore_after = compute_clipscore(clip_bundle, adapted_image, prompt)
+        reference_images_for_metrics.append(reference_rgb.copy())
+        base_images_for_metrics.append(base_image.copy())
+        adapted_images_for_metrics.append(adapted_image.copy())
         comparison_rows.append(
             {
                 "index": index,
@@ -496,6 +678,8 @@ def main():
                 "reference_mae_after": after_mae,
                 "reference_psnr_before": before_psnr,
                 "reference_psnr_after": after_psnr,
+                "reference_ssim_before": before_ssim,
+                "reference_ssim_after": after_ssim,
                 "before_after_mae": before_after_mae,
                 "token_match_before": token_before,
                 "token_match_after": token_after,
@@ -525,6 +709,7 @@ def main():
                 "improved_vs_reference": after_mae < before_mae,
                 "improved_token_match": token_after > token_before,
                 "improved_psnr": after_psnr > before_psnr,
+                "improved_ssim": after_ssim > before_ssim,
                 "improved_reference_nll": reference_nll_after < reference_nll_before,
                 "improved_gradient_energy": adapted_texture_errors["gradient_energy"] < base_texture_errors["gradient_energy"],
                 "improved_laplacian_variance": adapted_texture_errors["laplacian_variance"] < base_texture_errors["laplacian_variance"],
@@ -544,6 +729,8 @@ def main():
         "avg_reference_mae_after": float(np.mean([row["reference_mae_after"] for row in comparison_rows])),
         "avg_reference_psnr_before": float(np.mean([row["reference_psnr_before"] for row in comparison_rows])),
         "avg_reference_psnr_after": float(np.mean([row["reference_psnr_after"] for row in comparison_rows])),
+        "avg_reference_ssim_before": float(np.mean([row["reference_ssim_before"] for row in comparison_rows])),
+        "avg_reference_ssim_after": float(np.mean([row["reference_ssim_after"] for row in comparison_rows])),
         "avg_token_match_before": float(np.mean([row["token_match_before"] for row in comparison_rows])),
         "avg_token_match_after": float(np.mean([row["token_match_after"] for row in comparison_rows])),
         "avg_prefix64_match_before": float(np.mean([row["token_match_prefix64_before"] for row in comparison_rows])),
@@ -573,6 +760,7 @@ def main():
         "improved_vs_reference_count": int(sum(bool(row["improved_vs_reference"]) for row in comparison_rows)),
         "improved_token_match_count": int(sum(bool(row["improved_token_match"]) for row in comparison_rows)),
         "improved_psnr_count": int(sum(bool(row["improved_psnr"]) for row in comparison_rows)),
+        "improved_ssim_count": int(sum(bool(row["improved_ssim"]) for row in comparison_rows)),
         "improved_reference_nll_count": int(sum(bool(row["improved_reference_nll"]) for row in comparison_rows)),
         "improved_gradient_energy_count": int(sum(bool(row["improved_gradient_energy"]) for row in comparison_rows)),
         "improved_laplacian_variance_count": int(
@@ -590,6 +778,30 @@ def main():
     if clip_before_values and clip_after_values:
         summary["avg_clipscore_before"] = float(np.mean(clip_before_values))
         summary["avg_clipscore_after"] = float(np.mean(clip_after_values))
+    if inception_bundle is not None and comparison_rows:
+        try:
+            reference_features = compute_inception_features(
+                inception_bundle,
+                reference_images_for_metrics,
+                batch_size=args.inception_batch_size,
+            )
+            before_features = compute_inception_features(
+                inception_bundle,
+                base_images_for_metrics,
+                batch_size=args.inception_batch_size,
+            )
+            after_features = compute_inception_features(
+                inception_bundle,
+                adapted_images_for_metrics,
+                batch_size=args.inception_batch_size,
+            )
+            summary["fid_before"] = frechet_distance(before_features, reference_features)
+            summary["fid_after"] = frechet_distance(after_features, reference_features)
+            summary["kid_before"] = polynomial_mmd_kid(before_features, reference_features)
+            summary["kid_after"] = polynomial_mmd_kid(after_features, reference_features)
+            summary["inception_metrics_num_samples"] = len(comparison_rows)
+        except Exception as exc:
+            summary["inception_metrics_error"] = str(exc)
     with open(os.path.join(args.output_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     write_markdown_report(os.path.join(args.output_dir, "report.md"), summary, comparison_rows)

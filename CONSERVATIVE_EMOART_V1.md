@@ -19,10 +19,14 @@ The conservative adjustments are:
 
 - train output:
   - `/root/autodl-tmp/emoart_gen_runs/out_gen_expA_conservative_crop_headonly_v1`
-- 32-sample compare:
-  - `/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32`
 - 8-sample quick compare:
   - `/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_8`
+- 8-sample triptych packet:
+  - `/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_8/triptych_packet`
+- 32-sample compare:
+  - `/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32`
+- 32-sample triptych packet:
+  - `/root/autodl-tmp/emoart_gen_runs/out_gen_compare_expA_conservative_crop_headonly_32/triptych_packet`
 
 ## Train
 
@@ -69,6 +73,25 @@ python /root/autodl-tmp/repos/Janus/compare_emoart_gen.py \
   --art-texture-mode off \
   --art-texture-fields all
 ```
+
+## Auto Triptych Packet
+
+After either compare run, generate a visual packet with `target | raw | adapter` sheets:
+
+```bash
+/root/autodl-tmp/repos/Janus/run_emoart_conservative_v1.sh packet8
+```
+
+```bash
+/root/autodl-tmp/repos/Janus/run_emoart_conservative_v1.sh packet32
+```
+
+Generated files:
+
+- `review_packet.md`
+- `manual_review_sheet.md`
+- `packet_manifest.json`
+- `sheets/*.png`
 
 ## Full 32-Sample Compare
 
