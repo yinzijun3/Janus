@@ -1,0 +1,167 @@
+{
+  "track_name": "januspro7b_multi_expert_mainline_v1",
+  "model": {
+    "model_key": "januspro7b",
+    "model_path": "/root/autodl-tmp/models/januspro7b_mirror",
+    "dtype": "bf16",
+    "download": {
+      "repo_id": "deepseek-ai/Janus-Pro-7B",
+      "endpoint": "https://hf-mirror.com",
+      "revision": "main",
+      "weight_parallelism": 2,
+      "max_retries": 20,
+      "ignore_env_proxy": true,
+      "expected_sizes": {
+        "pytorch_model-00001-of-00002.bin": 9988183802,
+        "pytorch_model-00002-of-00002.bin": 4853013705
+      },
+      "required_files": [
+        "config.json",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "pytorch_model.bin.index.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "pytorch_model-00001-of-00002.bin",
+        "pytorch_model-00002-of-00002.bin"
+      ]
+    }
+  },
+  "experts": {
+    "decorative_linework": {
+      "description": "Narrow expert for decorative complexity and dotted micro-structure.",
+      "styles": [
+        "Art Nouveau (Modern)",
+        "Pointillism"
+      ]
+    },
+    "classical_structure": {
+      "description": "Narrow expert for classical figure/structure styles that currently collapse to safe templates.",
+      "styles": [
+        "High Renaissance",
+        "Early Renaissance",
+        "Mannerism (Late Renaissance)",
+        "Regionalism"
+      ]
+    }
+  },
+  "stages": [
+    {
+      "name": "stage1_family",
+      "train_manifest": "family_train",
+      "val_manifest": "family_val",
+      "train_args": {
+        "per_device_train_batch_size": 1,
+        "per_device_eval_batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "num_workers": 2,
+        "learning_rate": 2e-05,
+        "generation_learning_rate": 2e-05,
+        "num_epochs": 1.0,
+        "warmup_ratio": 0.03,
+        "save_steps": 100,
+        "eval_steps": 100,
+        "logging_steps": 10,
+        "lora_r": 32,
+        "lora_alpha": 64,
+        "lora_dropout": 0.05,
+        "target_modules": [
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj"
+        ],
+        "generation_module_mode": "frozen",
+        "scheduler_type": "cosine",
+        "image_preprocess_mode": "crop",
+        "prompt_template": "default",
+        "art_texture_mode": "off",
+        "art_texture_fields": "all",
+        "art_texture_prob": 0.0,
+        "seed": 42
+      }
+    },
+    {
+      "name": "stage2_texture_refine",
+      "train_manifest": "texture_train",
+      "val_manifest": "family_val",
+      "resume_from_stage": "stage1_family",
+      "train_args": {
+        "per_device_train_batch_size": 1,
+        "per_device_eval_batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "num_workers": 2,
+        "learning_rate": 1e-05,
+        "generation_learning_rate": 1e-05,
+        "num_epochs": 0.35,
+        "warmup_ratio": 0.03,
+        "save_steps": 50,
+        "eval_steps": 50,
+        "logging_steps": 10,
+        "lora_r": 32,
+        "lora_alpha": 64,
+        "lora_dropout": 0.05,
+        "target_modules": [
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj"
+        ],
+        "generation_module_mode": "frozen",
+        "scheduler_type": "cosine",
+        "image_preprocess_mode": "crop",
+        "prompt_template": "default",
+        "art_texture_mode": "off",
+        "art_texture_fields": "all",
+        "art_texture_prob": 0.0,
+        "seed": 42
+      }
+    }
+  ],
+  "evaluation_defaults": {
+    "seed": 42,
+    "parallel_size": 2,
+    "image_preprocess_mode": "crop",
+    "sample_strategy": "greedy",
+    "prompt_template": "default",
+    "art_texture_mode": "off",
+    "art_texture_fields": "all"
+  },
+  "evaluation_matrix": {
+    "stages": [
+      "stage1_family",
+      "stage2_texture_refine"
+    ],
+    "manifest_sources": [
+      "family_val",
+      "full_val"
+    ],
+    "sample_counts": [
+      8
+    ],
+    "build_packet": true
+  },
+  "continuation": {
+    "expert_order": [
+      "decorative_linework",
+      "classical_structure"
+    ],
+    "train_stage": "stage1_family",
+    "smoke_evaluations": [
+      {
+        "manifest_source": "family_val",
+        "num_samples": 8,
+        "build_packet": true
+      }
+    ],
+    "post_stage_evaluations": [
+      {
+        "manifest_source": "full_val",
+        "num_samples": 8,
+        "build_packet": true
+      }
+    ],
+    "auto_advance_to_stage2": false
+  }
+}

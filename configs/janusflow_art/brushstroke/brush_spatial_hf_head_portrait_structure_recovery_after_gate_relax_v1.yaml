@@ -1,0 +1,124 @@
+experiment:
+  name: D6_brush_spatial_hf_head_portrait_structure_recovery_after_gate_relax_v1
+  output_root: /root/autodl-tmp/emoart_gen_runs/brushstroke_experiments/D6_brush_spatial_hf_head_portrait_structure_recovery_after_gate_relax_v1
+
+model:
+  model_path: /root/autodl-tmp/model_cache/janusflow_art/JanusFlow-1.3B
+  vae_path: /root/autodl-tmp/model_cache/janusflow_art/sdxl-vae
+  dtype: bf16
+
+data:
+  train_manifest: /root/autodl-tmp/data/emoart_5k/gen_full_official_rebuild_v1/train_portrait_structure_v1.jsonl
+  val_manifest: /root/autodl-tmp/data/emoart_5k/gen_full_official_rebuild_v1/val_balanced_v1.jsonl
+  image_size: 384
+  image_preprocess_mode: crop
+  reference_image_size: 224
+  use_target_as_reference_when_missing: false
+  prompt_template: conservative
+  log_rendered_prompt: true
+
+training:
+  seed: 42
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 1
+  num_workers: 2
+  num_epochs: 4.0
+  max_steps: 1575
+  learning_rate: 0.0
+  generation_learning_rate: 5.0e-5
+  weight_decay: 0.0
+  warmup_ratio: 0.05
+  scheduler_type: cosine
+  gradient_checkpointing: true
+  max_grad_norm: 0.75
+  flow_loss_type: mse
+  use_cfg_training: true
+
+freeze:
+  understanding_path: true
+  train_art_projectors: false
+  trainable_base_modules:
+    - vision_gen_dec_aligner_norm
+    - vision_gen_dec_aligner
+  language_lora:
+    enabled: false
+
+conditioning:
+  enabled: false
+  style_hidden_size: 512
+  num_global_tokens: 4
+  num_local_tokens: 8
+  label_encoder:
+    enabled: false
+  reference_encoder:
+    enabled: false
+  injector:
+    enabled: false
+
+brush:
+  condition_unconditioned: false
+  style_hidden_size: 512
+  decoder_hidden_size: 768
+  adapter:
+    enabled: false
+  reference_encoder:
+    enabled: false
+  condition_injector:
+    enabled: false
+  decoder_experts:
+    enabled: false
+  feature_map_adapter:
+    enabled: false
+  spatial_hf_head:
+    enabled: true
+    hidden_channels: 512
+    kernel_size: 5
+    residual_init: 0.18
+    residual_scale: 2.1
+    dropout: 0.02
+    gate_bias_init: -2.0
+  output_velocity_head:
+    enabled: false
+  anchored_output_velocity_head:
+    enabled: false
+
+loss_weights:
+  flow: 1.0
+  semantic_align: 0.0
+  art_align: 0.0
+  style_cls: 0.0
+  texture_aux: 0.0
+  laplacian: 0.08
+  sobel: 0.03
+  fft_high_frequency: 0.03
+  low_frequency_consistency: 0.20
+  gate_l1: 0.005
+  gate_tv: 0.01
+  protected_gate_l1: 0.0
+
+sampling:
+  prompt_file: /root/autodl-tmp/repos/Janus/configs/janusflow_art/prompts_brush_reference.jsonl
+  output_subdir: sampled
+  num_inference_steps: 30
+  cfg_weight: 2.25
+  seeds: [42, 43, 44, 45]
+  save_grid: true
+  save_prompt_log: true
+
+evaluation:
+  prompt_file: /root/autodl-tmp/repos/Janus/configs/janusflow_art/prompts_brush_reference.jsonl
+  output_subdir: evaluation
+  compare_base_model: true
+  num_inference_steps: 30
+  cfg_weight: 2.25
+  seeds: [42, 43, 44, 45]
+  clip_model_name: openai/clip-vit-base-patch32
+  save_blind_review_bundle: true
+
+logging:
+  logging_steps: 10
+  eval_steps: 75
+  save_steps: 75
+  keep_last_prompts: 64
+  run_final_eval: false

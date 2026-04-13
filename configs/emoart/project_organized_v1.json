@@ -1,0 +1,16 @@
+{
+  "project_name": "emoart_style_experts",
+  "repo_dir": "/root/autodl-tmp/repos/Janus",
+  "output_root": "/root/autodl-tmp/emoart_gen_runs/organized",
+  "data": {
+    "base_train_manifest": "/root/autodl-tmp/emoart_gen_runs/data_risk_audit_train_texture_meta/train_frameclean_v2.jsonl",
+    "base_val_manifest": "/root/autodl-tmp/data/emoart_5k/gen_full_official_texture_meta/val.jsonl",
+    "texture_rich_manifest": "/root/autodl-tmp/emoart_gen_runs/data_risk_audit_train_texture_meta/train_texture_rich_v1.jsonl"
+  },
+  "references": {
+    "formal_baseline_adapter": "/root/autodl-tmp/emoart_gen_runs/out_gen_expA_full/final_adapter",
+    "strong_side_adapter": "/root/autodl-tmp/emoart_gen_runs/out_gen_expA_frameclean_v2/final_adapter",
+    "visual_qa_rules": "/root/autodl-tmp/repos/Janus/VISUAL_QA_RULES.md"
+  }
+}
+

@@ -18,10 +18,12 @@ from finetune.emoart_generation import (
     ART_TEXTURE_MODE_CHOICES,
     DEFAULT_ART_TEXTURE_FIELDS,
     DEFAULT_ART_TEXTURE_MODE,
+    DEFAULT_PATCH_SIZE,
     DEFAULT_IMAGE_SIZE,
     DEFAULT_PROMPT_TEMPLATE,
     PROMPT_TEMPLATE_CHOICES,
     build_prompt_from_record,
+    resolve_image_token_count,
     load_jsonl,
     preprocess_image_for_vq,
 )
@@ -55,8 +57,8 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--image-preprocess-mode", choices=["pad", "crop"], default="crop")
-    parser.add_argument("--patch-size", type=int, default=16)
-    parser.add_argument("--image-token-num-per-image", type=int, default=576)
+    parser.add_argument("--patch-size", type=int, default=DEFAULT_PATCH_SIZE)
+    parser.add_argument("--image-token-num-per-image", type=int, default=None)
     parser.add_argument("--sample-strategy", choices=["greedy", "sample"], default="greedy")
     parser.add_argument(
         "--prompt-template",
@@ -561,6 +563,11 @@ def write_markdown_report(path: str, summary: Dict[str, object], rows: List[Dict
 
 def main():
     args = parse_args()
+    resolved_image_token_count = resolve_image_token_count(
+        image_size=args.image_size,
+        patch_size=args.patch_size,
+        requested_token_count=args.image_token_num_per_image,
+    )
     os.makedirs(args.output_dir, exist_ok=True)
     before_dir = os.path.join(args.output_dir, "before")
     after_dir = os.path.join(args.output_dir, "after")
@@ -600,7 +607,7 @@ def main():
             parallel_size=args.parallel_size,
             cfg_weight=args.cfg_weight,
             temperature=args.temperature,
-            image_token_num_per_image=args.image_token_num_per_image,
+            image_token_num_per_image=resolved_image_token_count,
             image_size=args.image_size,
             patch_size=args.patch_size,
             seed=row_seed,
@@ -613,7 +620,7 @@ def main():
             parallel_size=args.parallel_size,
             cfg_weight=args.cfg_weight,
             temperature=args.temperature,
-            image_token_num_per_image=args.image_token_num_per_image,
+            image_token_num_per_image=resolved_image_token_count,
             image_size=args.image_size,
             patch_size=args.patch_size,
             seed=row_seed,
@@ -629,6 +636,13 @@ def main():
             args.image_size,
             args.image_preprocess_mode,
         )
+        if reference_tokens.numel() != resolved_image_token_count:
+            raise RuntimeError(
+                "Reference token geometry mismatch: "
+                f"{record['request_id']} produced {reference_tokens.numel()} encoded tokens, "
+                f"but image_size={args.image_size} and patch_size={args.patch_size} require "
+                f"{resolved_image_token_count}."
+            )
 
         with PIL.Image.open(record["image_path"]) as reference_image:
             reference_rgb = reference_image.convert("RGB")
@@ -725,6 +739,9 @@ def main():
     summary = {
         "num_samples": len(comparison_rows),
         "adapter_path": args.adapter_path,
+        "image_size": args.image_size,
+        "patch_size": args.patch_size,
+        "image_token_num_per_image": resolved_image_token_count,
         "avg_reference_mae_before": float(np.mean([row["reference_mae_before"] for row in comparison_rows])),
         "avg_reference_mae_after": float(np.mean([row["reference_mae_after"] for row in comparison_rows])),
         "avg_reference_psnr_before": float(np.mean([row["reference_psnr_before"] for row in comparison_rows])),

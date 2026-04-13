@@ -419,3 +419,23 @@ tags
 .vscode
 .github
 generated_samples/
+
+
+##### Janus Local Experiments #####
+# Local scratch outputs created while iterating on training/eval workflows.
+tmp_*/
+smoke_*/
+local_runs/
+local_outputs/
+debug_outputs/
+scratch/
+
+# Common local report / packet staging dirs when created inside the repo root.
+triptych_packet/
+review_packet/
+sheets/
+before/
+after/
+target/
+base/
+adapter/

@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM, get_cosine_schedule_with_warmup, 
 from finetune.emoart_generation import (
     ART_TEXTURE_FIELD_CHOICES,
     ART_TEXTURE_MODE_CHOICES,
-    DEFAULT_IMAGE_TOKEN_COUNT,
+    DEFAULT_PATCH_SIZE,
     DEFAULT_IMAGE_SIZE,
     DEFAULT_ART_TEXTURE_FIELDS,
     DEFAULT_ART_TEXTURE_MODE,
@@ -26,6 +26,8 @@ from finetune.emoart_generation import (
     EmoArtGenerationJsonlDataset,
     JanusGenerationDataCollator,
     PROMPT_TEMPLATE_CHOICES,
+    compute_image_token_count,
+    validate_image_generation_geometry,
 )
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 
@@ -161,6 +163,53 @@ def parse_args():
         type=int,
         default=1234,
         help="Base seed for retention prompt token-prefix generation.",
+    )
+    parser.add_argument(
+        "--rehearsal-manifest",
+        default=None,
+        help="Optional JSONL of prompt-only generic/art prompts used for mixed-domain rehearsal.",
+    )
+    parser.add_argument(
+        "--rehearsal-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for the mixed-domain rehearsal CE loss.",
+    )
+    parser.add_argument(
+        "--rehearsal-batch-size",
+        type=int,
+        default=8,
+        help="Prompt batch size for mixed-domain rehearsal updates.",
+    )
+    parser.add_argument(
+        "--rehearsal-num-workers",
+        type=int,
+        default=0,
+        help="Data loader workers for prompt-only rehearsal manifest.",
+    )
+    parser.add_argument(
+        "--rehearsal-token-count",
+        type=int,
+        default=32,
+        help="Number of teacher-generated image tokens used as pseudo targets for rehearsal.",
+    )
+    parser.add_argument(
+        "--rehearsal-cfg-weight",
+        type=float,
+        default=5.0,
+        help="CFG weight used for teacher generation on rehearsal prompts.",
+    )
+    parser.add_argument(
+        "--rehearsal-sample-strategy",
+        choices=["greedy", "sample"],
+        default="greedy",
+        help="Sampling strategy for teacher generation on rehearsal prompts.",
+    )
+    parser.add_argument(
+        "--rehearsal-seed",
+        type=int,
+        default=4321,
+        help="Base seed for teacher generation on rehearsal prompts.",
     )
     return parser.parse_args()
 
@@ -594,6 +643,38 @@ def compute_retention_kl_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature**2)
 
 
+def compute_rehearsal_ce_loss(
+    student_model: MultiModalityCausalLM,
+    teacher_model: MultiModalityCausalLM,
+    processor: VLChatProcessor,
+    prompt_ids: List[torch.LongTensor],
+    token_count: int,
+    cfg_weight: float,
+    sample_strategy: str,
+    seed_base: int,
+):
+    teacher_token_rows: List[torch.LongTensor] = []
+    for index, prompt_id in enumerate(prompt_ids):
+        teacher_token_rows.append(
+            generate_token_prefix(
+                model=teacher_model,
+                processor=processor,
+                prompt_id=prompt_id,
+                token_count=token_count,
+                cfg_weight=cfg_weight,
+                sample_strategy=sample_strategy,
+                seed=seed_base + index,
+            )
+        )
+    teacher_tokens = torch.stack(teacher_token_rows, dim=0)
+    loss, metrics = compute_generation_loss_and_metrics(
+        model=student_model,
+        prompt_ids=prompt_ids,
+        image_token_ids=teacher_tokens,
+    )
+    return loss, metrics
+
+
 def evaluate(model, dataloader, dtype):
     model.eval()
     total_loss = 0.0
@@ -651,6 +732,13 @@ def save_checkpoint(model, processor, optimizer, scheduler, output_dir, step, ar
 
 def main():
     args = parse_args()
+    resolved_image_token_count = compute_image_token_count(args.image_size, DEFAULT_PATCH_SIZE)
+    validate_image_generation_geometry(
+        image_size=args.image_size,
+        patch_size=DEFAULT_PATCH_SIZE,
+        expected_token_count=resolved_image_token_count,
+    )
+    args.image_token_num_per_image = resolved_image_token_count
     os.makedirs(args.output_dir, exist_ok=True)
     set_seed(args.seed)
 
@@ -660,10 +748,16 @@ def main():
     retention_dataset = None
     if args.retention_manifest:
         retention_dataset = PromptOnlyJsonlDataset(args.retention_manifest)
+    rehearsal_dataset = None
+    if args.rehearsal_manifest:
+        rehearsal_dataset = PromptOnlyJsonlDataset(args.rehearsal_manifest)
 
     model, processor, enabled_generation_modules = build_model(args, dtype)
     teacher_model = None
-    if retention_dataset is not None and args.retention_loss_weight > 0.0:
+    if (
+        (retention_dataset is not None and args.retention_loss_weight > 0.0)
+        or (rehearsal_dataset is not None and args.rehearsal_loss_weight > 0.0)
+    ):
         teacher_model = build_teacher_model(args.model_path, dtype)
     collator = JanusGenerationDataCollator(
         processor=processor,
@@ -674,7 +768,11 @@ def main():
         art_texture_fields=args.art_texture_fields,
         art_texture_prob=args.art_texture_prob,
     )
-    retention_collator = JanusPromptOnlyCollator(processor=processor) if retention_dataset is not None else None
+    retention_collator = (
+        JanusPromptOnlyCollator(processor=processor)
+        if (retention_dataset is not None or rehearsal_dataset is not None)
+        else None
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -690,6 +788,15 @@ def main():
             batch_size=args.retention_batch_size,
             shuffle=True,
             num_workers=args.retention_num_workers,
+            collate_fn=retention_collator,
+        )
+    rehearsal_loader = None
+    if rehearsal_dataset is not None:
+        rehearsal_loader = DataLoader(
+            rehearsal_dataset,
+            batch_size=args.rehearsal_batch_size,
+            shuffle=True,
+            num_workers=args.rehearsal_num_workers,
             collate_fn=retention_collator,
         )
     val_loader = DataLoader(
@@ -739,6 +846,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == torch.float16 and torch.cuda.is_available()))
     device = next(model.parameters()).device
     retention_iterator = iter(retention_loader) if retention_loader is not None else None
+    rehearsal_iterator = iter(rehearsal_loader) if rehearsal_loader is not None else None
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -831,7 +939,7 @@ def main():
                             teacher_model=teacher_model,
                             processor=processor,
                             prompt_ids=retention_batch["prompt_ids"],
-                            token_prefix=min(args.retention_token_prefix, DEFAULT_IMAGE_TOKEN_COUNT),
+                            token_prefix=min(args.retention_token_prefix, resolved_image_token_count),
                             cfg_weight=args.retention_cfg_weight,
                             sample_strategy=args.retention_sample_strategy,
                             temperature=args.retention_temperature,
@@ -843,6 +951,34 @@ def main():
                         scaler.scale(scaled_retention_loss).backward()
                     else:
                         scaled_retention_loss.backward()
+
+                rehearsal_loss_value: Optional[float] = None
+                rehearsal_token_accuracy: Optional[float] = None
+                if rehearsal_loader is not None and teacher_model is not None and args.rehearsal_loss_weight > 0.0:
+                    rehearsal_batch, rehearsal_iterator = next_retention_batch(rehearsal_loader, rehearsal_iterator)
+                    rehearsal_batch = move_prompt_batch_to_device(rehearsal_batch, device)
+                    with (
+                        torch.autocast(device_type="cuda", dtype=dtype)
+                        if torch.cuda.is_available()
+                        else nullcontext()
+                    ):
+                        rehearsal_loss, rehearsal_metrics = compute_rehearsal_ce_loss(
+                            student_model=model,
+                            teacher_model=teacher_model,
+                            processor=processor,
+                            prompt_ids=rehearsal_batch["prompt_ids"],
+                            token_count=min(args.rehearsal_token_count, resolved_image_token_count),
+                            cfg_weight=args.rehearsal_cfg_weight,
+                            sample_strategy=args.rehearsal_sample_strategy,
+                            seed_base=args.rehearsal_seed + global_step * max(args.rehearsal_batch_size, 1),
+                        )
+                        scaled_rehearsal_loss = rehearsal_loss * args.rehearsal_loss_weight
+                    rehearsal_loss_value = float(rehearsal_loss.item())
+                    rehearsal_token_accuracy = float(rehearsal_metrics["token_accuracy"])
+                    if scaler.is_enabled():
+                        scaler.scale(scaled_rehearsal_loss).backward()
+                    else:
+                        scaled_rehearsal_loss.backward()
 
                 grad_norm = 0.0
                 if scaler.is_enabled():
@@ -874,6 +1010,10 @@ def main():
                 }
                 if retention_loss_value is not None:
                     log_record["retention_kl_loss"] = retention_loss_value
+                if rehearsal_loss_value is not None:
+                    log_record["rehearsal_ce_loss"] = rehearsal_loss_value
+                if rehearsal_token_accuracy is not None:
+                    log_record["rehearsal_token_accuracy"] = rehearsal_token_accuracy
                 print(log_record)
                 log_file.write(json.dumps(log_record, ensure_ascii=False) + "\n")
                 log_file.flush()

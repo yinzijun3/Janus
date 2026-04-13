@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 
 DEFAULT_IMAGE_SIZE = 384
-DEFAULT_IMAGE_TOKEN_COUNT = 576
+DEFAULT_PATCH_SIZE = 16
 _BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 DEFAULT_PROMPT_TEMPLATE = "default"
 DEFAULT_ART_TEXTURE_MODE = "off"
@@ -51,6 +51,51 @@ _GENERIC_TEXTURE_TAGS = {
         "material depth in the paint surface",
     ],
 }
+
+
+def compute_image_token_count(image_size: int, patch_size: int = DEFAULT_PATCH_SIZE) -> int:
+    validate_image_generation_geometry(image_size=image_size, patch_size=patch_size)
+    return (image_size // patch_size) ** 2
+
+
+def validate_image_generation_geometry(
+    image_size: int,
+    patch_size: int = DEFAULT_PATCH_SIZE,
+    expected_token_count: Optional[int] = None,
+) -> int:
+    if image_size <= 0:
+        raise ValueError(f"image_size must be positive, got {image_size}.")
+    if patch_size <= 0:
+        raise ValueError(f"patch_size must be positive, got {patch_size}.")
+    if image_size % patch_size != 0:
+        raise ValueError(
+            f"image_size={image_size} must be divisible by patch_size={patch_size}."
+        )
+    token_count = (image_size // patch_size) ** 2
+    if expected_token_count is not None and expected_token_count != token_count:
+        raise ValueError(
+            "image token geometry mismatch: "
+            f"image_size={image_size}, patch_size={patch_size} implies "
+            f"{token_count} tokens, but expected_token_count={expected_token_count}."
+        )
+    return token_count
+
+
+def resolve_image_token_count(
+    image_size: int,
+    patch_size: int = DEFAULT_PATCH_SIZE,
+    requested_token_count: Optional[int] = None,
+) -> int:
+    if requested_token_count is None:
+        return validate_image_generation_geometry(image_size=image_size, patch_size=patch_size)
+    return validate_image_generation_geometry(
+        image_size=image_size,
+        patch_size=patch_size,
+        expected_token_count=requested_token_count,
+    )
+
+
+DEFAULT_IMAGE_TOKEN_COUNT = compute_image_token_count(DEFAULT_IMAGE_SIZE, DEFAULT_PATCH_SIZE)
 
 
 def normalize_image_path(image_path: str) -> str:
